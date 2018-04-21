@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+input=$(cat)
+echo "$input"
+current=$(grep -Po '(?<=View pull request for ).*(?= => )' <<< "$input") || exit
+pr_upstream=$(grep -Po '(?<=View pull request for '$current' => ).*(?=:)' <<< "$input") || exit
+# TODO: it assumes the current branch is pushed
+machete_upstream=$(git machete show up 2>/dev/null) || exit
+
+if [[ "$machete_upstream" != "$pr_upstream" ]]; then
+    echo "warning: 'git machete' shows that upstream of '$current' is '$machete_upstream', while upstream in the PR is '$pr_upstream'" >&2
+    echo "not updating annotation for '$current'" >&2
+else
+    file=`git machete file`
+    existing_anno=$(grep -Po "(?<=\\b$current\\b ).*$" $file)
+    pr_num=$(grep -Po '(?<=https://bitbucket\.org/britishpearl/pip/pull-requests/)\d+' <<< "$input")
+    new_anno="PR #$pr_num"
+
+    if [[ "$existing_anno" != "$new_anno" ]]; then
+        if [[ "$existing_anno" != "" ]]; then
+            echo "warning: branch '$current' is already annotated as '$existing_anno'" >&2
+            echo "not updating annotation for '$current' to '$new_anno'" >&2
+        else
+            sed -i "s@\\b$current\$@$current $new_anno@" $file
+            echo "info: set up annotation for '$current' to '$new_anno'"
+        fi
+    fi
+fi
