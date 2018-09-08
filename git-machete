@@ -742,7 +742,7 @@ def slide_out(bs):
     up_branch[d] = u
     down_branches[u] = [(d if x == bs[0] else x) for x in down_branches[u]]
     save_definition_file()
-    update(d, opt_down_fork_point or fork_point(d))
+    traverse()
 
 
 def slidable():
@@ -1161,7 +1161,7 @@ def usage(c=None):
             * 'up':    the direct parent/upstream branch of the current branch.
         """,
         "slide-out": """
-            Usage: git machete slide-out [-d|--down-fork-point=<down-fork-point-commit>] <branch> [<branch> [<branch> ...]]
+            Usage: git machete slide-out <branch> [<branch> [<branch> ...]]
 
             Removes the given branch (or multiple branches) from the branch tree definition.
             Then, rebases the downstream (child) branch of the last specified branch on the top of the upstream (parent) branch of the first specified branch.
@@ -1190,10 +1190,6 @@ def usage(c=None):
             and 'change-table' will be rebased onto develop (fork point for this rebase is configurable, see '-d' option below).
 
             Note: This command doesn't delete any branches from git, just removes them from the tree of branch dependencies.
-
-            Options:
-            -d, --down-fork-point=<down-fork-point-commit>    Specifies the alternative fork-point commit after which the rebased part of history of the downstream branch should start.
-                                                              See also doc for '--fork-point' option for 'git machete help reapply' and 'git machete help update'.
         """,
         "status": """
             Usage: git machete s[tatus] [-l|--list-commits]
@@ -1503,7 +1499,7 @@ try:
         read_definition_file()
         print parse_direction(current_branch(), down_pick_mode=False)
     elif cmd == "slide-out":
-        params = parse_options(args, "d:", ["down-fork-point="])
+        params = parse_options(args)
         read_definition_file()
         slide_out(params or [current_branch()])
     elif cmd in ("s", "status"):
