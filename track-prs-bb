@@ -13,7 +13,7 @@ if [[ "$machete_upstream" != "$pr_upstream" ]]; then
 else
     file=`git machete file`
     existing_anno=$(grep -Po "(?<=\\b$current\\b ).*$" $file)
-    pr_num=$(grep -Po '(?<=https://bitbucket\.org/britishpearl/pip/pull-requests/)\d+' <<< "$input")
+    pr_num=$(grep -o 'https://bitbucket\.org/britishpearl/.*/pull-requests/[0-9]\+' <<< "$input" | grep -o '[0-9]\+$')
     new_anno="PR #$pr_num"
 
     if [[ "$existing_anno" != "$new_anno" ]]; then
