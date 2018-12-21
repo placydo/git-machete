@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+submod_rel_path=`git config -l | grep -Po '(?<=submodule\.).*?(?=\.url)' | head -1`
+[ -n "$submod_rel_path" ] || exit 0
+
+branch=$1
+submod_commit=`git ls-tree -d "$branch" -- $submod_rel_path | grep -Po '(?<=160000 commit ).*(?=\t)'`
+[ -n "submod_commit" ] || exit 0
+
+refs=`git --work-tree=$submod_rel_path --git-dir=.git/modules/$submod_rel_path log --no-walk --format=%D --decorate --decorate-refs-exclude=refs/remotes/ $submod_commit`
+
+dim='\033[2m'
+endc='\033[0m'
+
+echo -ne "$dim[`basename $submod_rel_path` at $endc"
+if [ -n "$refs" ] && [ "$refs" != HEAD ]; then
+    echo -n $refs
+else
+    echo -n `git rev-parse --short $submod_commit`
+fi
+echo -e "$dim]$endc"

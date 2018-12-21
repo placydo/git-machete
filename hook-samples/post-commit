@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+exec </dev/tty
+git symbolic-ref --quiet HEAD >/dev/null || exit 0
+current_branch=$(git symbolic-ref --short HEAD)
+git machete list unmanaged | grep -qxF "$current_branch" || exit 0
+git machete add "$current_branch"

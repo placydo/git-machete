@@ -26,7 +26,7 @@ BOLD = '\033[1m'
 DIM = '\033[2m'
 UNDERLINE = '\033[4m'
 GREEN = '\033[32m'
-YELLOW = '\033[00;38;5;220m'
+YELLOW = '\033[33m'
 ORANGE = '\033[00;38;5;208m'
 RED = '\033[91m'
 
@@ -104,14 +104,14 @@ def run_git(git_cmd, *args, **kwargs):
     return status
 
 
-def popen_git(git_cmd, *args):
+def popen_git(git_cmd, *args, **kwargs):
     flat_cmd = " ".join(["git", git_cmd] + list(args))
     if opt_debug:
         print >> sys.stderr, underline(flat_cmd)
     elif opt_verbose:
         print >> sys.stderr, flat_cmd
     status, stdout = popen_cmd("git", git_cmd, *args)
-    if status != 0:
+    if not kwargs.get("allow_non_zero") and status != 0:
         raise MacheteException("'%s' returned %i" % (flat_cmd, status))
     if opt_debug:
         print >> sys.stderr, dim(stdout)
@@ -366,12 +366,26 @@ def print_annotation():
 
 # Implementation of basic git or git-related commands
 
+def is_executable(path):
+    return os.access(path, os.X_OK)
+
+
 def edit():
     return run_cmd(os.environ.get("EDITOR") or "vim", definition_file)
 
 
 def get_git_dir():
     return popen_git("rev-parse", "--git-dir").strip()
+
+
+config_cached = {}
+
+
+def get_config(key):
+    global config_cached
+    if key not in config_cached:
+        config_cached[key] = popen_git("config", "--", key, allow_non_zero=True).rstrip()
+    return config_cached[key]
 
 
 remotes_cached = None
@@ -494,12 +508,44 @@ def go(branch):
     run_git("checkout", "--quiet", branch, "--")
 
 
+def check_hook_executable(file_name):
+    hook_path = git_dir + "/hooks/" + file_name
+    if not os.path.exists(hook_path):
+        return False
+    elif not is_executable(hook_path):
+        advice_ignored_hook = get_config("advice.ignoredHook")
+        if advice_ignored_hook != 'false':  # both empty and "true" is okay
+            # The [33m color must be used to keep consistent with how git colors this advice for its native hooks.
+            print >> sys.stderr, YELLOW + "hint: The '.git/hooks/%s' hook was ignored because it's not set as executable." % file_name + ENDC
+            print >> sys.stderr, YELLOW + "hint: You can disable this warning with `git config advice.ignoredHook false`." + ENDC
+        return False
+    else:
+        return True
+
+
+def rebase(onto, fork_commit, branch):
+    def do_rebase():
+        run_git("rebase", "--interactive", "--onto", onto, fork_commit, branch)
+
+    hook = "machete-pre-rebase"
+    if check_hook_executable(hook):
+        hook_path = git_dir + "/hooks/" + hook
+        debug("rebase(%s, %s, %s)" % (onto, fork_commit, branch), "running machete-pre-rebase hook (%s)" % hook_path)
+        status = run_cmd(hook_path, onto, fork_commit, branch)
+        if status == 0:
+            do_rebase()
+        else:
+            print >> sys.stderr, "The machete-pre-rebase hook refused to rebase."
+            sys.exit(status)
+    else:
+        do_rebase()
+
 def update(branch, fork_commit):
-    run_git("rebase", "--interactive", "--onto", "refs/heads/" + up(branch, prompt_if_inferred=True), fork_commit, branch)
+    rebase("refs/heads/" + up(branch, prompt_if_inferred=True), fork_commit, branch)
 
 
 def reapply(branch, fork_commit):
-    run_git("rebase", "--interactive", "--onto", fork_commit, fork_commit, branch)
+    rebase(fork_commit, fork_commit, branch)
 
 
 def diff(branch):
@@ -1004,6 +1050,7 @@ def status():
     remote_sync_status = {}
     commits_cached = {}
     fork_points_cached = {}
+
     for b, pfx in dfs_res:
         if b in up_branch:
             needs_sync_with_up_branch[b] = not is_ancestor(up_branch[b], b)
@@ -1017,6 +1064,16 @@ def status():
         # Force computing all needed SHAs to avoid later polluting the printed status in case of --verbose mode.
         sha_by_refspec(b)
         remote_sync_status[b] = get_remote_sync_status(b)
+
+    hook_output = {}
+    hook = "machete-status-branch"
+    if check_hook_executable(hook):
+        hook_path = git_dir + "/hooks/" + hook
+        for b, pfx in dfs_res:
+            debug("status()", "running machete-status-branch hook (%s) for branch %s" % (hook_path, b))
+            status, stdout = popen_cmd(hook_path, b)
+            if status == 0 and not stdout.isspace():
+                hook_output[b] = "  " + stdout.rstrip()
 
     def edge_color(b):
         return RED if needs_sync_with_up_branch[b] else (GREEN if sha_by_refspec(up_branch[b]) == fork_points_cached[b] else YELLOW)
@@ -1033,8 +1090,9 @@ def status():
     cb = current_branch_or_none()
 
     for b, pfx in dfs_res:
-        current = bold(b) + ("  " + dim(annotations[b]) if b in annotations else "")
-        current_ul = underline(current) if b == cb else current
+        current = underline(bold(b)) if b == cb else bold(b)
+        anno = "  " + dim(annotations[b]) if b in annotations else ""
+
         if b in up_branch:
             print_line_prefix(b, "│ \n")
             if opt_list_commits:
@@ -1055,7 +1113,7 @@ def status():
             AHEAD_OF_REMOTE: RED + " (ahead of %s)" % remote + ENDC,
             DIVERGED_FROM_REMOTE: RED + " (diverged from %s)" % remote + ENDC
         }
-        print current_ul + sync_status_string[s]
+        print current + anno + sync_status_string[s] + (hook_output.get(b) or "")
 
 
 # Main
@@ -1404,7 +1462,7 @@ def usage(c=None):
 
 
 def short_usage():
-    print "Usage: git machete [--help] [--verbose] [--version] <command> [command-specific options] [command-specific argument]"
+    print "Usage: git machete [--debug] [-h|--help] [-v|--verbose] [--version] <command> [command-specific options] [command-specific argument]"
 
 
 def version():
@@ -1494,7 +1552,7 @@ try:
             raise MacheteException("Not a git repository")
 
         definition_file = os.path.join(git_dir, "machete")
-        if cmd not in ("discover", "infer") and not os.path.exists(definition_file):
+        if cmd not in ("discover", "infer") and not os.path.isfile(definition_file):
             open(definition_file, 'w').close()
 
     directions = "d[own]|f[irst]|l[ast]|n[ext]|p[rev]|r[oot]|u[p]"
