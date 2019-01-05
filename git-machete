@@ -8,7 +8,7 @@ import subprocess
 import sys
 import textwrap
 
-VERSION = '2.8.5'
+VERSION = '2.9.0'
 
 
 # Core utils
@@ -710,7 +710,10 @@ def discover_tree():
     managed_branches = local_branches()
     if not managed_branches:
         raise MacheteException("No local branches found")
-    roots = []
+    for r in opt_roots:
+        if r not in local_branches():
+            raise MacheteException("'%s' is not a local branch" % r)
+    roots = list(opt_roots)
     down_branches = {}
     up_branch = {}
     indent = "\t"
@@ -723,7 +726,7 @@ def discover_tree():
             root_of[b] = get_root_of(root_of[b])
         return root_of[b]
 
-    for b in managed_branches:
+    for b in excluding(managed_branches, opt_roots):
         u = infer_upstream(b, condition=lambda u: get_root_of(u) != b, reject_reason_message= "choosing this candidate would form a cycle in the resulting graph")
         if u:
             debug("discover_tree()" , "inferred upstream of %s "
@@ -1509,7 +1512,7 @@ def version():
 
 
 def parse_options(in_args, short_opts="", long_opts=[], gnu=True):
-    global cmd, opt_debug, opt_down_fork_point, opt_fork_point, opt_list_commits, opt_onto, opt_stat, opt_verbose
+    global cmd, opt_debug, opt_down_fork_point, opt_fork_point, opt_list_commits, opt_onto, opt_roots, opt_stat, opt_verbose
 
     fun = getopt.gnu_getopt if gnu else getopt.getopt
     opts, rest = fun(in_args, short_opts + "hv", long_opts + ['debug', 'help', 'verbose', 'version'])
@@ -1528,6 +1531,8 @@ def parse_options(in_args, short_opts="", long_opts=[], gnu=True):
             opt_list_commits = True
         elif opt in ("-o", "--onto"):
             opt_onto = arg
+        elif opt in ("-r", "--root"):
+            opt_roots = set(arg.split(","))
         elif opt in ("-s", "--stat"):
             opt_stat = True
         elif opt in ("-v", "--verbose"):
@@ -1574,6 +1579,7 @@ try:
     opt_fork_point = None
     opt_list_commits = False
     opt_onto = None
+    opt_roots = []
     opt_stat = False
     opt_verbose = False
 
@@ -1629,7 +1635,7 @@ try:
         # No need to read definition file.
         diff(param) # passing None if not specified
     elif cmd == "discover":
-        expect_no_param(parse_options(args, "l", ["list-commits"]))
+        expect_no_param(parse_options(args, "lr:", ["list-commits", "roots="]))
         # No need to read definition file.
         discover_tree()
     elif cmd in ("e", "edit"):
