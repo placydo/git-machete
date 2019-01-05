@@ -424,22 +424,22 @@ def remote_for_branch(b):
         return None
 
 
-def compute_sha_by_refspec(refspec):
+def compute_sha_by_revision(revision):
     try:
-        return popen_git("rev-parse", "--verify", "--quiet", refspec).rstrip()
+        return popen_git("rev-parse", "--verify", "--quiet", revision).rstrip()
     except MacheteException:
         return None
 
 
-sha_by_refspec_cached = {}
+sha_by_revision_cached = {}
 
 
-def sha_by_refspec(refspec, prefix = "refs/heads"):
-    global sha_by_refspec_cached
-    full_refspec = prefix + "/" + refspec
-    if full_refspec not in sha_by_refspec_cached:
-        sha_by_refspec_cached[full_refspec] = compute_sha_by_refspec(full_refspec)
-    return sha_by_refspec_cached[full_refspec]
+def sha_by_revision(revision, prefix ="refs/heads"):
+    global sha_by_revision_cached
+    full_revision = prefix + "/" + revision
+    if full_revision not in sha_by_revision_cached:
+        sha_by_revision_cached[full_revision] = compute_sha_by_revision(full_revision)
+    return sha_by_revision_cached[full_revision]
 
 
 remote_tracking_branches_cached = {}
@@ -483,8 +483,8 @@ def create_branch(b, out_of):
     return run_git("checkout", "-b", b, *(["refs/heads/" + out_of] if out_of else []))
 
 
-def log_shas(refspec, max_count):
-    opts = (["--max-count=" + str(max_count)] if max_count else []) + ["--format=%H", "refs/heads/" + refspec]
+def log_shas(revision, max_count):
+    opts = (["--max-count=" + str(max_count)] if max_count else []) + ["--format=%H", "refs/heads/" + revision]
     return non_empty_lines(popen_git("log", *opts))
 
 
@@ -856,12 +856,12 @@ def traverse():
     global down_branches, up_branch, empty_line_status, managed_branches
 
     def flush():
-        global branch_defs_by_sha_in_reflog, initial_log_shas_cached, remaining_log_shas_cached, remote_tracking_branches_cached, sha_by_refspec_cached
+        global branch_defs_by_sha_in_reflog, initial_log_shas_cached, remaining_log_shas_cached, remote_tracking_branches_cached, sha_by_revision_cached
         branch_defs_by_sha_in_reflog = None
         initial_log_shas_cached = {}
         remaining_log_shas_cached = {}
         remote_tracking_branches_cached = {}
-        sha_by_refspec_cached = {}
+        sha_by_revision_cached = {}
 
     empty_line_status = True
 
@@ -877,12 +877,12 @@ def traverse():
     for b in itertools.dropwhile(lambda x: x != cb, managed_branches):
         u = up_branch.get(b)
 
-        needs_slide_out = u and is_ancestor(b, u) and sha_by_refspec(u) != sha_by_refspec(b)
+        needs_slide_out = u and is_ancestor(b, u) and sha_by_revision(u) != sha_by_revision(b)
         if needs_slide_out:
             # Avoid unnecessary fork point check if we already now that the branch qualifies for slide out.
             needs_rebase = False
         else:
-            needs_rebase = u and not (is_ancestor(u, b) and sha_by_refspec(u) == fork_point(b))
+            needs_rebase = u and not (is_ancestor(u, b) and sha_by_revision(u) == fork_point(b))
         s, remote = get_remote_sync_status(b)
         statuses_to_sync = (UNTRACKED, UNTRACKED_ON, AHEAD_OF_REMOTE, BEHIND_REMOTE, DIVERGED_FROM_REMOTE)
         needs_remote_sync = s in statuses_to_sync
@@ -963,7 +963,7 @@ def traverse():
                     can_pick_other_remote = len(rems) > 1
                     other_remote_suffix = "/o[ther remote]" if can_pick_other_remote else ""
                     rb = new_remote + "/" + b
-                    if not sha_by_refspec(rb, prefix="refs/remotes"):
+                    if not sha_by_revision(rb, prefix="refs/remotes"):
                         ans = raw_input("Push untracked branch %s to %s? (y/n/q%s) " % (bold(b), bold(new_remote), other_remote_suffix)).lower()
                         if ans in ('y', 'yes'):
                             run_git("push", "--set-upstream", new_remote, b)
@@ -1051,7 +1051,7 @@ def traverse():
 
 
 def status():
-    global sha_by_refspec_cached
+    global sha_by_revision_cached
 
     dfs_res = []
 
@@ -1081,7 +1081,7 @@ def status():
             if opt_list_commits:
                 commits_cached[b] = reversed(commits_between(fork_points_cached[b], "refs/heads/" + b)) if fork_points_cached[b] else []
         # Force computing all needed SHAs to avoid later polluting the printed status in case of --verbose mode.
-        sha_by_refspec(b)
+        sha_by_revision(b)
         remote_sync_status[b] = get_remote_sync_status(b)
 
     hook_output = {}
@@ -1095,7 +1095,7 @@ def status():
                 hook_output[b] = "  " + stdout.rstrip()
 
     def edge_color(b):
-        return RED if needs_sync_with_up_branch[b] else (GREEN if sha_by_refspec(up_branch[b]) == fork_points_cached[b] else YELLOW)
+        return RED if needs_sync_with_up_branch[b] else (GREEN if sha_by_revision(up_branch[b]) == fork_points_cached[b] else YELLOW)
 
     def print_line_prefix(b, suffix):
         sys.stdout.write("  ")
