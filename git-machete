@@ -760,12 +760,19 @@ def discover_tree():
 
 
 def fork_point(b):
+    if b in up_branch and is_ancestor(up_branch[b], b):
+        return up_branch[b]
+    else:
+        return hard_fork_point(b)
+
+
+def hard_fork_point(b):
     try:
         sha, containing_branch_defs = next(match_log_to_adjusted_reflogs(b))
     except StopIteration:
         raise MacheteException("Cannot find fork point for branch '%s'" % b)
 
-    debug("fork_point(%s)" % b,
+    debug("hard_fork_point(%s)" % b,
           "commit %s is the most recent point in history of %s to occur on adjusted reflog of any other branch or its remote counterpart (specifically: %s)\n" %
           (sha, b, " and ".join(map(lambda (lb, lb_or_rb): lb_or_rb, containing_branch_defs))))
     return sha
@@ -824,6 +831,8 @@ def slide_out(bs):
 
     u = up_branch[bs[0]]
     d = down_branches[bs[-1]][0]
+    # We need to remember the fork point of `d` as it was before the upstream of `d` changes in the process of slide-out.
+    fp = opt_down_fork_point or fork_point(d)
     for b in bs:
         up_branch[b] = None
         down_branches[b] = None
@@ -832,7 +841,7 @@ def slide_out(bs):
     up_branch[d] = u
     down_branches[u] = [(d if x == bs[0] else x) for x in down_branches[u]]
     save_definition_file()
-    update(d, opt_down_fork_point or fork_point(d))
+    update(d, fp)
 
 
 def slidable():
@@ -880,12 +889,12 @@ def traverse():
     for b in itertools.dropwhile(lambda x: x != cb, managed_branches):
         u = up_branch.get(b)
 
-        needs_slide_out = u and is_ancestor(b, u) and sha_by_revision(u) != sha_by_revision(b)
+        needs_slide_out = u and is_ancestor(b, u)
         if needs_slide_out:
-            # Avoid unnecessary fork point check if we already now that the branch qualifies for slide out.
+            # Avoid unnecessary ancestry check if we already now that the branch qualifies for slide out.
             needs_rebase = False
         else:
-            needs_rebase = u and not (is_ancestor(u, b) and sha_by_revision(u) == fork_point(b))
+            needs_rebase = u and not is_ancestor(u, b)
         s, remote = get_remote_sync_status(b)
         statuses_to_sync = (UNTRACKED, UNTRACKED_ON, AHEAD_OF_REMOTE, BEHIND_REMOTE, DIVERGED_FROM_REMOTE)
         needs_remote_sync = s in statuses_to_sync
@@ -1091,20 +1100,16 @@ def status():
     needs_sync_with_up_branch = {}
     remote_sync_status = {}
     commits_cached = {}
-    fork_points_cached = {}
 
     for b, pfx in dfs_res:
         if b in up_branch:
             needs_sync_with_up_branch[b] = not is_ancestor(up_branch[b], b)
-            # Force computing all needed fork points to avoid later polluting the printed status in case of --verbose mode.
-            try:
-                fork_points_cached[b] = fork_point(b)
-            except MacheteException:
-                fork_points_cached[b] = None
             if opt_list_commits:
-                commits_cached[b] = reversed(commits_between(fork_points_cached[b], "refs/heads/" + b)) if fork_points_cached[b] else []
-        # Force computing all needed SHAs to avoid later polluting the printed status in case of --verbose mode.
-        sha_by_revision(b)
+                try:
+                    fp = hard_fork_point(b) if needs_sync_with_up_branch[b] else up_branch[b]
+                    commits_cached[b] = reversed(commits_between(fp, "refs/heads/" + b))
+                except MacheteException: # due to missing fork point
+                    commits_cached[b] = []
         remote_sync_status[b] = get_remote_sync_status(b)
 
     hook_output = {}
@@ -1118,7 +1123,7 @@ def status():
                 hook_output[b] = "  " + stdout.rstrip()
 
     def edge_color(b):
-        return RED if needs_sync_with_up_branch[b] else (GREEN if sha_by_revision(up_branch[b]) == fork_points_cached[b] else YELLOW)
+        return RED if needs_sync_with_up_branch[b] else GREEN
 
     def print_line_prefix(b, suffix):
         sys.stdout.write("  ")
@@ -1415,13 +1420,9 @@ def usage(c=None):
               - prints '(untracked [on <remote>]/ahead of <remote>/behind <remote>/diverged from <remote>)' message for each branch that is not in sync with its remote counterpart;
             * colors the edges between upstream (parent) and downstream (children) branches depending on whether downstream branch commit is a direct descendant of the upstream branch commit:
               - red edge means that the downstream branch commit is NOT a direct descendant of the upstream branch commit (basically, the downstream branch is out of sync with its upstream branch),
-              - yellow means that the opposite holds true, i.e. the downstream branch is in sync with its upstream branch, but the fork point of the downstream branch is a different commit than upstream branch tip,
-              - green means that downstream branch is in sync with its upstream branch (so just like for yellow edge) and the fork point of downstream branch is EQUAL to the upstream branch tip.
+              - green means that the opposite holds true, i.e. the downstream branch is in sync with its upstream branch.
             * displays the custom annotations (see help on 'format') next to each branch, if present;
             * optionally lists commits introduced on each branch if '--list-commits' is supplied.
-
-            Note: in practice, both yellow and red edges suggest that the downstream branch should be updated against its upstream.
-            Yellow typically indicates that there are/were commits from some other branches on the path between upstream and downstream and that a closer look at the log of the downstream branch might be necessary.
 
             Options:
             -l, --list-commits            Additionally lists the messages of commits introduced on each branch.
@@ -1632,7 +1633,7 @@ try:
         delete_unmanaged()
     elif cmd in ("d", "diff"):
         param = check_optional_param(parse_options(args, "s", ["stat"]))
-        # No need to read definition file.
+        read_definition_file()
         diff(param) # passing None if not specified
     elif cmd == "discover":
         expect_no_param(parse_options(args, "lr:", ["list-commits", "roots="]))
@@ -1648,7 +1649,7 @@ try:
         print definition_file
     elif cmd == "fork-point":
         param = check_optional_param(parse_options(args))
-        # No need to read definition file.
+        read_definition_file()
         print fork_point(param or current_branch())
     elif cmd == "format":
         # No need to read definition file.
@@ -1699,7 +1700,7 @@ try:
         print "\n".join(res),
     elif cmd in ("l", "log"):
         param = check_optional_param(parse_options(args))
-        # No need to read definition file.
+        read_definition_file()
         log(param or current_branch())
     elif cmd == "prune-branches":
         expect_no_param(parse_options(args))
@@ -1708,7 +1709,7 @@ try:
     elif cmd == "reapply":
         args1 = parse_options(args, "f:", ["fork-point="])
         expect_no_param(args1, ". Use '-f' or '--fork-point' to specify the fork point commit")
-        # No need to read definition file.
+        read_definition_file()
         cb = current_branch()
         reapply(cb, opt_fork_point or fork_point(cb))
     elif cmd == "show":
