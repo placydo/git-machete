@@ -77,12 +77,12 @@ def debug(hdr, msg):
         print >> sys.stderr, "%s: %s" % (bold(hdr), dim(msg))
 
 
-def run_cmd(cmd, *args):
-    return subprocess.call([cmd] + list(args))
+def run_cmd(cmd, *args, **kwargs):
+    return subprocess.call([cmd] + list(args), cwd=kwargs.get("cwd"))
 
 
-def popen_cmd(cmd, *args):
-    process = subprocess.Popen([cmd] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def popen_cmd(cmd, *args, **kwargs):
+    process = subprocess.Popen([cmd] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=kwargs.get("cwd"))
     stdoutdata, stderrdata = process.communicate()
     return process.returncode, stdoutdata
 
@@ -374,8 +374,27 @@ def edit():
     return run_cmd(os.environ.get("EDITOR") or "vim", definition_file)
 
 
+root_dir = None
+
+
+def get_root_dir():
+    global root_dir
+    if not root_dir:
+        root_dir = popen_git("rev-parse", "--show-toplevel").strip()
+    return root_dir
+
+
+git_dir = None
+
+
 def get_git_dir():
-    return popen_git("rev-parse", "--git-dir").strip()
+    global git_dir
+    if not git_dir:
+        try:
+            git_dir = popen_git("rev-parse", "--git-dir").strip()
+        except MacheteException:
+            raise MacheteException("Not a git repository")
+    return git_dir
 
 
 config_cached = {}
@@ -509,7 +528,7 @@ def go(branch):
 
 
 def check_hook_executable(file_name):
-    hook_path = git_dir + "/hooks/" + file_name
+    hook_path = get_git_dir() + "/hooks/" + file_name
     if not os.path.exists(hook_path):
         return False
     elif not is_executable(hook_path):
@@ -529,9 +548,9 @@ def rebase(onto, fork_commit, branch):
 
     hook = "machete-pre-rebase"
     if check_hook_executable(hook):
-        hook_path = git_dir + "/hooks/" + hook
+        hook_path = get_git_dir() + "/hooks/" + hook
         debug("rebase(%s, %s, %s)" % (onto, fork_commit, branch), "running machete-pre-rebase hook (%s)" % hook_path)
-        status = run_cmd(hook_path, onto, fork_commit, branch)
+        status = run_cmd(hook_path, onto, fork_commit, branch, cwd=get_root_dir())
         if status == 0:
             do_rebase()
         else:
@@ -1068,10 +1087,10 @@ def status():
     hook_output = {}
     hook = "machete-status-branch"
     if check_hook_executable(hook):
-        hook_path = git_dir + "/hooks/" + hook
+        hook_path = get_git_dir() + "/hooks/" + hook
         for b, pfx in dfs_res:
             debug("status()", "running machete-status-branch hook (%s) for branch %s" % (hook_path, b))
-            status, stdout = popen_cmd(hook_path, b)
+            status, stdout = popen_cmd(hook_path, b, cwd=get_root_dir())
             if status == 0 and not stdout.isspace():
                 hook_output[b] = "  " + stdout.rstrip()
 
@@ -1546,12 +1565,7 @@ try:
     args = all_args[1:]
 
     if cmd not in ("format", "help"):
-        try:
-            git_dir = get_git_dir()
-        except MacheteException:
-            raise MacheteException("Not a git repository")
-
-        definition_file = os.path.join(git_dir, "machete")
+        definition_file = os.path.join(get_git_dir(), "machete")
         if cmd not in ("discover", "infer") and not os.path.isfile(definition_file):
             open(definition_file, 'w').close()
 
