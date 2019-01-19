@@ -1,5 +1,11 @@
 # Release notes
 
+## New in git-machete 2.14.0
+
+- added: fork point override feature via `--inferred`, `--override-to`, `--override-to-inferred`, `--override-to-parent` and `--unset-override` options of `fork-point`
+- added: `with-overridden-fork-point` category of `list`
+- fixed: command-line argument validation for `list`
+
 ## New in git-machete 2.13.1
 
 - improved: testing against multiple git versions in CI pipeline
