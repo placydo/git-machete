@@ -1,5 +1,18 @@
 # Release notes
 
+## New in git-machete 2.13.0
+
+- added: `version` command
+- added: `--yes` flag to `add`
+- added: `--yes` flag to `delete-unmanaged`
+- added: `--yes` flag to `discover`
+- added: `--no-interactive-rebase` flag to `reapply`
+- added: `--no-interactive-rebase` flag to `slide-out`
+- added: `--fetch`, `--no-interactive-rebase`, `--return-to`, `--start-from`, `--whole`, `--yes` flags to `traverse`
+- added: `--no-interactive-rebase` flag to `update`
+- fixed: in case the current branch is unmanaged, `go last` goes to the last branch under the *last* root and not to the last branch under the *first* root
+- fixed: zsh completion for `add` and `s`
+
 ## New in git-machete 2.12.9
 
 - fixed: missing Debian build dependency on `git`
