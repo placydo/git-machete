@@ -1,5 +1,9 @@
 # Release notes
 
+## New in git-machete 2.15.0
+
+- added: `--list-commits-with-hashes` flag to `status`
+
 ## New in git-machete 2.14.1
 
 - added: detection of an ongoing cherry-pick, merge or rebase
