@@ -197,6 +197,12 @@ def expect_at_least_one_managed_branch():
         raise_no_branches_error()
 
 
+def raise_no_branches_error():
+    raise MacheteException(
+        "No branches listed in %s; use 'git machete discover' or 'git machete edit', or edit %s manually." % (
+            definition_file, definition_file))
+
+
 def read_definition_file():
     global indent, managed_branches, down_branches, up_branch, roots, annotations
 
@@ -427,23 +433,19 @@ def add(b):
     save_definition_file()
 
 
-def annotate(words):
+def annotate(b, words):
     global annotations
-    cb = current_branch()
-    expect_in_managed_branches(cb)
-    if cb in annotations and words == ['']:
-        del annotations[cb]
+    if b in annotations and words == ['']:
+        del annotations[b]
     else:
-        annotations[cb] = " ".join(words)
+        annotations[b] = " ".join(words)
     save_definition_file()
 
 
-def print_annotation():
+def print_annotation(b):
     global annotations
-    cb = current_branch()
-    expect_in_managed_branches(cb)
-    if cb in annotations:
-        print(annotations[cb])
+    if b in annotations:
+        print(annotations[b])
 
 
 # Implementation of basic git or git-related commands
@@ -524,6 +526,10 @@ def get_abs_git_dir():
         except MacheteException:
             raise MacheteException("Not a git repository")
     return abs_git_dir
+
+
+def get_abs_git_subpath(*fragments):
+    return os.path.join(get_abs_git_dir(), *fragments)
 
 
 def parse_git_timespec_to_unix_timestamp(date):
@@ -642,8 +648,7 @@ def commit_sha_by_revision(revision, prefix="refs/heads/"):
 def find_remote_tracking_branch(b):
     try:
         # Note: no need to prefix 'b' with 'refs/heads/', '@{upstream}' assumes local branch automatically.
-        return popen_git("rev-parse", "--abbrev-ref",
-                         b + "@{upstream}").strip()
+        return popen_git("rev-parse", "--abbrev-ref", b + "@{upstream}").strip()
     except MacheteException:
         # Since many people don't use '--set-upstream' flag of 'push', we try to infer the remote tracking branch instead.
         if remotes():
@@ -663,19 +668,67 @@ def remote_tracking_branch(b):
     return remote_tracking_branches_cached[b]
 
 
-def current_branch_or_none():
+def is_cherry_pick_in_progress():
+    return os.path.isfile(get_abs_git_subpath("CHERRY_PICK_HEAD"))
+
+
+def is_merge_in_progress():
+    return os.path.isfile(get_abs_git_subpath("MERGE_HEAD"))
+
+
+# Note: rebase always puts the repository in a detached HEAD state,
+# so we need to extract the name of the currently rebased branch from the rebase-specific internals
+# rather than rely on 'git symbolic-ref HEAD` (i.e. .git/HEAD).
+def currently_rebased_branch_or_none():
+    # https://stackoverflow.com/questions/3921409
+
+    head_name_file = None
+
+    # .git/rebase-merge directory exists during cherry-pick-powered rebases,
+    # e.g. all interactive ones and the ones where '--strategy=' or '--keep-empty' option has been passed
+    rebase_merge_head_name_file = get_abs_git_subpath("rebase-merge", "head-name")
+    if os.path.isfile(rebase_merge_head_name_file):
+        head_name_file = rebase_merge_head_name_file
+
+    # .git/rebase-apply directory exists during the remaining, i.e. am-powered rebases
+    rebase_apply_head_name_file = get_abs_git_subpath("rebase-apply", "head-name")
+    if os.path.exists(rebase_apply_head_name_file):
+        head_name_file = rebase_apply_head_name_file
+
+    if not head_name_file:
+        return None
+    with open(head_name_file) as f:
+        raw = f.read().strip()
+        return re.sub("^refs/heads/", "", raw)
+
+
+def currently_checked_out_branch_or_none():
     try:
-        return popen_git("symbolic-ref", "--quiet", "HEAD").strip().replace("refs/heads/", "")
+        raw = popen_git("symbolic-ref", "--quiet", "HEAD").strip()
+        return re.sub("^refs/heads/", "", raw)
     except MacheteException:
         return None
 
 
+def expect_no_operation_in_progress():
+    rb = currently_rebased_branch_or_none()
+    if rb:
+        raise MacheteException("Rebase of '%s' in progress. Conclude the rebase first with 'git rebase --continue' or 'git rebase --abort'." % rb)
+    if is_merge_in_progress():
+        raise MacheteException("Merge in progress. Conclude the merge first with 'git merge --continue' or 'git merge --abort'.")
+    if is_cherry_pick_in_progress():
+        raise MacheteException("Cherry pick in progress. Conclude the cherry pick first with 'git cherry-pick --continue' or 'git cherry-pick --abort'.")
+
+
+def current_branch_or_none():
+    return currently_checked_out_branch_or_none() or currently_rebased_branch_or_none()
+
+
 def current_branch():
-    res = current_branch_or_none()
-    if res:
-        return res
-    else:
+    result = current_branch_or_none()
+    if not result:
         raise MacheteException("Not currently on any branch")
+    return result
 
 
 merge_base_cached = {}
@@ -793,12 +846,12 @@ def go(branch):
 
 
 def get_hook_path(hook_name):
-    hook_dir = get_config_or_none("core.hooksPath") or os.path.join(get_abs_git_dir(), "hooks")
+    hook_dir = get_config_or_none("core.hooksPath") or get_abs_git_subpath("hooks")
     return os.path.join(hook_dir, hook_name)
 
 
 def check_hook_executable(hook_path):
-    if not os.path.exists(hook_path):
+    if not os.path.isfile(hook_path):
         return False
     elif not is_executable(hook_path):
         advice_ignored_hook = get_config_or_none("advice.ignoredHook")
@@ -1122,7 +1175,7 @@ def discover_tree():
     print(bold('Discovered tree of branch dependencies:\n'))
     status(use_fork_point_overrides=False, warn_on_yellow_edges=False)
     print("")
-    do_backup = os.path.exists(definition_file)
+    do_backup = os.path.isfile(definition_file)
     backup_msg = ("The existing definition file will be backed up as '%s~' " % definition_file) if do_backup else ""
     msg = "Save the above tree to '%s'? %s([y]es/[e]dit/[N]o) " % (definition_file, backup_msg)
     opt_yes_msg = "Saving the above tree to '%s'... %s" % (definition_file, backup_msg)
@@ -1580,6 +1633,15 @@ def traverse():
                 update(b, fork_point(b, use_overrides=True))
                 if ans == 'yq':
                     return
+                # It's clearly possible that rebase can be in progress after 'git rebase' returned non-zero exit code;
+                # this happens most commonly in case of conflicts, regardless of whether the rebase is interactive or not.
+                # But for interactive rebases, it's still possible that even if 'git rebase' returned zero,
+                # the rebase is still in progress; e.g. when interactive rebase gets to 'edit' command, it will exit returning zero,
+                # but the rebase will be still in progress, waiting for user edits and a subsequent 'git rebase --continue'.
+                rb = currently_rebased_branch_or_none()
+                if rb:  # 'rb' should be equal 'b' at this point anyway
+                    sys.stdout.write("\nRebase of '%s' in progress; stopping the traversal\n" % rb)
+                    return
                 flush()
                 s, remote = get_remote_sync_status(b)
                 needs_remote_sync = s in statuses_to_sync
@@ -1703,7 +1765,8 @@ def status(use_fork_point_overrides, warn_on_yellow_edges):
         else:
             edge_color[b] = YELLOW
 
-    cb = current_branch_or_none()
+    crb = currently_rebased_branch_or_none()
+    ccob = currently_checked_out_branch_or_none()
 
     hook_path = get_hook_path("machete-status-branch")
     hook_executable = check_hook_executable(hook_path)
@@ -1751,7 +1814,18 @@ def status(use_fork_point_overrides, warn_on_yellow_edges):
                 write_unicode("\n")
             write_unicode("  ")
 
-        current = underline(bold(b)) if b == cb else bold(b)
+        if b in (ccob, crb):  # i.e. if b is the current branch (checked out or being rebased)
+            if b == crb:
+                prefix = "REBASING "
+            elif is_merge_in_progress():
+                prefix = "MERGING "
+            elif is_cherry_pick_in_progress():
+                prefix = "CHERRY-PICKING "
+            else:
+                prefix = ""
+            current = "%s%s" % (bold(colored(prefix, RED)) if prefix else "", bold(underline(b)))
+        else:
+            current = bold(b)
 
         anno = "  " + dim(annotations[b]) if b in annotations else ""
 
@@ -1801,11 +1875,6 @@ def status(use_fork_point_overrides, warn_on_yellow_edges):
 
 
 # Main
-
-def raise_no_branches_error():
-    raise MacheteException(
-        "No branches listed in %s; use 'git machete discover' or 'git machete edit', or edit %s manually." % (
-            definition_file, definition_file))
 
 
 def usage(c=None):
@@ -2388,8 +2457,8 @@ def launch(orig_args):
         args = cmd_and_args[1:]
 
         if cmd not in ("format", "help"):
-            definition_file = os.path.join(get_abs_git_dir(), "machete")
-            if cmd not in ("discover", "infer") and not os.path.exists(definition_file):
+            definition_file = get_abs_git_subpath("machete")
+            if cmd not in ("discover", "infer") and not os.path.isfile(definition_file):
                 open(definition_file, 'w').close()
 
         directions = "d[own]|f[irst]|l[ast]|n[ext]|p[rev]|r[oot]|u[p]"
@@ -2419,10 +2488,12 @@ def launch(orig_args):
         elif cmd == "anno":
             params = parse_options(args)
             read_definition_file()
+            b = current_branch()
+            expect_in_managed_branches(b)
             if params:
-                annotate(params)
+                annotate(b, params)
             else:
-                print_annotation()
+                print_annotation(b)
         elif cmd == "delete-unmanaged":
             expect_no_param(parse_options(args, "y", ["yes"]))
             read_definition_file()
@@ -2473,6 +2544,7 @@ def launch(orig_args):
         elif cmd in ("g", "go"):
             param = check_required_param(parse_options(args), directions)
             read_definition_file()
+            expect_no_operation_in_progress()
             cb = current_branch()
             dest = parse_direction(cb, down_pick_mode=True)
             if dest != cb:
@@ -2533,6 +2605,7 @@ def launch(orig_args):
             args1 = parse_options(args, "f:", ["fork-point="])
             expect_no_param(args1, ". Use '-f' or '--fork-point' to specify the fork point commit")
             read_definition_file()
+            expect_no_operation_in_progress()
             cb = current_branch()
             reapply(cb, opt_fork_point or fork_point(cb, use_overrides=True))
         elif cmd == "show":
@@ -2542,6 +2615,7 @@ def launch(orig_args):
         elif cmd == "slide-out":
             params = parse_options(args, "d:n", ["down-fork-point=", "no-interactive-rebase"])
             read_definition_file()
+            expect_no_operation_in_progress()
             slide_out(params or [current_branch()])
         elif cmd in ("s", "status"):
             expect_no_param(parse_options(args, "l", ["list-commits", "color="]))
@@ -2561,11 +2635,13 @@ def launch(orig_args):
             if opt_return_to not in ("here", "nearest-remaining", "stay"):
                 raise MacheteException("Invalid argument for '--return-to'. Valid arguments: here|nearest-remaining|stay.")
             read_definition_file()
+            expect_no_operation_in_progress()
             traverse()
         elif cmd == "update":
             args1 = parse_options(args, "f:n", ["fork-point=", "no-interactive-rebase"])
             expect_no_param(args1, ". Use '-f' or '--fork-point' to specify the fork point commit")
             read_definition_file()
+            expect_no_operation_in_progress()
             cb = current_branch()
             update(cb, opt_fork_point or fork_point(cb, use_overrides=True))
         elif cmd == "version":

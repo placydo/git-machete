@@ -1,5 +1,10 @@
 # Release notes
 
+## New in git-machete 2.14.1
+
+- added: detection of an ongoing cherry-pick, merge or rebase
+- fixed: `traverse` used to continue the walk when interactive rebase stopped for `edit` (rather than stop the traversal and allow for the actual edits)
+
 ## New in git-machete 2.14.0
 
 - added: fork point override feature via `--inferred`, `--override-to`, `--override-to-inferred`, `--override-to-parent` and `--unset-override` options of `fork-point`
