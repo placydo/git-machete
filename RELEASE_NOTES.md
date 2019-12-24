@@ -1,5 +1,9 @@
 # Release notes
 
+## New in git-machete 2.16.0
+
+- added: support for automated merging via `--merge` and `--no-edit-merge` flags of `slide-out`, `traverse` and `update`
+
 ## New in git-machete 2.15.0
 
 - added: `--list-commits-with-hashes` flag to `status`

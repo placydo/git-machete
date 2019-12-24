@@ -676,7 +676,7 @@ def is_merge_in_progress():
     return os.path.isfile(get_abs_git_subpath("MERGE_HEAD"))
 
 
-# Note: rebase always puts the repository in a detached HEAD state,
+# Note: while rebase is ongoing, the repository is always in a detached HEAD state,
 # so we need to extract the name of the currently rebased branch from the rebase-specific internals
 # rather than rely on 'git symbolic-ref HEAD` (i.e. .git/HEAD).
 def currently_rebased_branch_or_none():
@@ -864,6 +864,14 @@ def check_hook_executable(hook_path):
         return True
 
 
+def merge(branch, into):  # refs/heads/ prefix is assumed for 'branch'
+    extra_params = ["--no-edit"] if opt_no_edit_merge else ["--edit"]
+    # We need to specify the message explicitly to avoid 'refs/heads/' prefix getting into the message...
+    commit_message = "Merge branch '%s' into %s" % (branch, into)
+    # ...since we prepend 'refs/heads/' to the merged branch name for unambiguity.
+    run_git("merge", "-m", commit_message, "refs/heads/" + branch, *extra_params)
+
+
 def rebase(onto, fork_commit, branch):
     def do_rebase():
         if opt_no_interactive_rebase:
@@ -884,15 +892,22 @@ def rebase(onto, fork_commit, branch):
         do_rebase()
 
 
-def update(branch, fork_commit):
-    onto = up(branch,
-              prompt_if_inferred_msg="Branch '%s' not found in the tree of branch dependencies. Rebase onto the inferred upstream '%s'? [y/N] ",
-              prompt_if_inferred_yes_opt_msg="Branch '%s' not found in the tree of branch dependencies. Rebasing onto the inferred upstream '%s'...")
-    rebase("refs/heads/" + onto, fork_commit, branch)
+def rebase_onto_ancestor_commit(branch, ancestor_commit):
+    rebase(ancestor_commit, ancestor_commit, branch)
 
 
-def reapply(branch, fork_commit):
-    rebase(fork_commit, fork_commit, branch)
+def update():
+    cb = current_branch()
+    if opt_merge:
+        with_branch = up(cb,
+                         prompt_if_inferred_msg="Branch '%s' not found in the tree of branch dependencies. Merge with the inferred upstream '%s'? [y/N] ",
+                         prompt_if_inferred_yes_opt_msg="Branch '%s' not found in the tree of branch dependencies. Merging with the inferred upstream '%s'...")
+        merge(with_branch, cb)
+    else:
+        onto_branch = up(cb,
+                         prompt_if_inferred_msg="Branch '%s' not found in the tree of branch dependencies. Rebase onto the inferred upstream '%s'? [y/N] ",
+                         prompt_if_inferred_yes_opt_msg="Branch '%s' not found in the tree of branch dependencies. Rebasing onto the inferred upstream '%s'...")
+        rebase("refs/heads/" + onto_branch, opt_fork_point or fork_point(cb, use_overrides=True), cb)
 
 
 def diff(branch):
@@ -1395,8 +1410,12 @@ def slide_out(bs):
     up_branch[d] = u
     down_branches[u] = [(d if x == bs[0] else x) for x in down_branches[u]]
     save_definition_file()
-    print("Rebasing %s onto %s..." % (bold(d), bold(u)))
-    update(d, opt_down_fork_point or fork_point(d, use_overrides=True))
+    if opt_merge:
+        print("Merging %s into %s..." % (bold(u), bold(d)))
+        merge(u, d)
+    else:
+        print("Rebasing %s onto %s..." % (bold(d), bold(u)))
+        rebase("refs/heads/" + u, opt_down_fork_point or fork_point(d, use_overrides=True), d)
 
 
 def slidable():
@@ -1494,8 +1513,8 @@ def handle_untracked_branch(new_remote, b):
             "Setting the remote of %s to %s..." % (bold(b), bold(new_remote))
         ),
         BEHIND_REMOTE: (
-            "Pull %s from %s? (y/N/q/yq%s) " % (bold(b), bold(new_remote), other_remote_suffix),
-            "Pulling %s from %s..." % (bold(b), bold(new_remote))
+            "Pull %s (fast-forward only) from %s? (y/N/q/yq%s) " % (bold(b), bold(new_remote), other_remote_suffix),
+            "Pulling %s (fast-forward only) from %s..." % (bold(b), bold(new_remote))
         ),
         AHEAD_OF_REMOTE: (
             "Push branch %s to %s? (y/N/q/yq%s) " % (bold(b), bold(new_remote), other_remote_suffix),
@@ -1574,11 +1593,12 @@ def traverse():
         needs_slide_out = is_merged_to_parent(b)
         if needs_slide_out:
             # Avoid unnecessary fork point check if we already know that the branch qualifies for slide out;
-            # rebase won't be suggested in such case anyway.
-            needs_rebase = False
-        else:
-            needs_rebase = u and not \
-                (is_ancestor(u, b) and commit_sha_by_revision(u) == fork_point(b, use_overrides=True))
+            # neither rebase nor merge will be suggested in such case anyway.
+            needs_parent_sync = False
+        elif opt_merge:
+            needs_parent_sync = u and not is_ancestor(u, b)
+        else:  # using rebase
+            needs_parent_sync = u and not (is_ancestor(u, b) and commit_sha_by_revision(u) == fork_point(b, use_overrides=True))
         s, remote = get_remote_sync_status(b)
         statuses_to_sync = (UNTRACKED,
                             UNTRACKED_ON,
@@ -1587,7 +1607,7 @@ def traverse():
                             DIVERGED_FROM_REMOTE)
         needs_remote_sync = s in statuses_to_sync
 
-        if b != cb and (needs_slide_out or needs_rebase or needs_remote_sync):
+        if b != cb and (needs_slide_out or needs_parent_sync or needs_remote_sync):
             print_new_line(False)
             sys.stdout.write("Checking out %s\n" % bold(b))
             go(b)
@@ -1622,26 +1642,38 @@ def traverse():
                 continue  # No need to sync branch 'b' with remote since it just got removed from the tree of dependencies.
             elif ans in ('q', 'quit'):
                 return
-            # If user answered 'no', we don't try to rebase but still suggest to sync with remote (if needed; very rare in practice).
-        elif needs_rebase:
+            # If user answered 'no', we don't try to rebase/merge but still suggest to sync with remote (if needed; very rare in practice).
+        elif needs_parent_sync:
             print_new_line(False)
-            ans = ask_if(
-                "Rebase %s onto %s? [y/N/q/yq] " % (bold(b), bold(u)),
-                "Rebasing %s onto %s..." % (bold(b), bold(u))
-            )
+            if opt_merge:
+                ans = ask_if("Merge %s into %s? [y/N/q/yq] " % (bold(u), bold(b)), "Merging %s into %s..." % (bold(u), bold(b)))
+            else:
+                ans = ask_if("Rebase %s onto %s? [y/N/q/yq] " % (bold(b), bold(u)), "Rebasing %s onto %s..." % (bold(b), bold(u)))
             if ans in ('y', 'yes', 'yq'):
-                update(b, fork_point(b, use_overrides=True))
+                if opt_merge:
+                    merge(u, b)
+                    # It's clearly possible that merge can be in progress after 'git merge' returned non-zero exit code;
+                    # this happens most commonly in case of conflicts.
+                    # As for now, we're not aware of any case when merge can be still in progress after 'git merge' returns zero,
+                    # at least not with the options that git-machete passes to merge; this happens though in case of 'git merge --no-commit' (which we don't ever invoke).
+                    # It's still better, however, to be on the safe side.
+                    if is_merge_in_progress():
+                        sys.stdout.write("\nMerge in progress; stopping the traversal\n")
+                        return
+                else:
+                    rebase("refs/heads/" + u, fork_point(b, use_overrides=True), b)
+                    # It's clearly possible that rebase can be in progress after 'git rebase' returned non-zero exit code;
+                    # this happens most commonly in case of conflicts, regardless of whether the rebase is interactive or not.
+                    # But for interactive rebases, it's still possible that even if 'git rebase' returned zero,
+                    # the rebase is still in progress; e.g. when interactive rebase gets to 'edit' command, it will exit returning zero,
+                    # but the rebase will be still in progress, waiting for user edits and a subsequent 'git rebase --continue'.
+                    rb = currently_rebased_branch_or_none()
+                    if rb:  # 'rb' should be equal to 'b' at this point anyway
+                        sys.stdout.write("\nRebase of '%s' in progress; stopping the traversal\n" % rb)
+                        return
                 if ans == 'yq':
                     return
-                # It's clearly possible that rebase can be in progress after 'git rebase' returned non-zero exit code;
-                # this happens most commonly in case of conflicts, regardless of whether the rebase is interactive or not.
-                # But for interactive rebases, it's still possible that even if 'git rebase' returned zero,
-                # the rebase is still in progress; e.g. when interactive rebase gets to 'edit' command, it will exit returning zero,
-                # but the rebase will be still in progress, waiting for user edits and a subsequent 'git rebase --continue'.
-                rb = currently_rebased_branch_or_none()
-                if rb:  # 'rb' should be equal 'b' at this point anyway
-                    sys.stdout.write("\nRebase of '%s' in progress; stopping the traversal\n" % rb)
-                    return
+
                 flush()
                 s, remote = get_remote_sync_status(b)
                 needs_remote_sync = s in statuses_to_sync
@@ -1652,8 +1684,8 @@ def traverse():
             if s == BEHIND_REMOTE:
                 rb = remote_tracking_branch(b)
                 ans = ask_if(
-                    "Branch %s is behind its remote counterpart %s.\nPull %s from %s? [y/N/q/yq] " % (bold(b), bold(rb), bold(b), bold(remote)),
-                    "Branch %s is behind its remote counterpart %s.\nPulling %s from %s..." % (bold(b), bold(rb), bold(b), bold(remote))
+                    "Branch %s is behind its remote counterpart %s.\nPull %s (fast-forward only) from %s? [y/N/q/yq] " % (bold(b), bold(rb), bold(b), bold(remote)),
+                    "Branch %s is behind its remote counterpart %s.\nPulling %s (fast-forward only) from %s..." % (bold(b), bold(rb), bold(b), bold(remote))
                 )
                 if ans in ('y', 'yes', 'yq'):
                     pull_ff_only(remote, b)
@@ -1897,10 +1929,10 @@ def usage(c=None):
         "log": "Log the part of history specific to the given branch",
         "reapply": "Rebase the current branch onto its computed fork point",
         "show": "Show name(s) of the branch(es) relative to the position of the current branch, accepts down/first/last/next/root/prev/up argument",
-        "slide-out": "Slide out the given chain of branches and rebase its downstream (child) branch onto its upstream (parent) branch",
+        "slide-out": "Slide the current branch out and sync its downstream (child) branch with its upstream (parent) branch via rebase or merge",
         "status": "Display formatted tree of branch dependencies, including info on their sync with upstream branch and with remote",
-        "traverse": "Walk through the tree of branch dependencies and ask to rebase, slide out, push and/or pull branches, one by one",
-        "update": "Rebase the current branch onto its upstream (parent) branch",
+        "traverse": "Walk through the tree of branch dependencies and rebase, merge, slide out, push and/or pull each branch one by one",
+        "update": "Sync the current branch with its upstream (parent) branch via rebase or merge",
         "version": "Display the version and exit"
     }
     long_docs = {
@@ -2075,7 +2107,7 @@ def usage(c=None):
             Prints a summary of this tool, or a detailed info on a command if defined.
         """,
         "hooks": """
-            As for standard git hooks, the hooks are expected in $GIT_DIR/hooks/* (or $(git config core.hooksPath)/*, if set).
+            As for standard git hooks, git-machete looks for its own specific hooks in $GIT_DIR/hooks/* (or $(git config core.hooksPath)/*, if set).
 
             Note: 'hooks' is not a command as such, just a help topic (there is no 'git machete hooks' command).
 
@@ -2150,50 +2182,55 @@ def usage(c=None):
             * 'first': the first downstream of the root branch of the current branch (like 'root' followed by 'next'), or the root branch itself if the root has no downstream branches.
             * 'last':  the last branch in the definition file that has the same root as the current branch; can be the root branch itself if the root has no downstream branches.
             * 'next':  the direct successor of the current branch in the definition file.
-            * 'prev':  the direct predeccessor of the current branch in the definition file.
+            * 'prev':  the direct predecessor of the current branch in the definition file.
             * 'root':  the root of the tree where the current branch is located. Note: this will typically be something like 'develop' or 'master', since all branches are usually meant to be ultimately merged to one of those.
             * 'up':    the direct parent/upstream branch of the current branch.
         """,
         "slide-out": """
-            Usage: git machete slide-out [-d|--down-fork-point=<down-fork-point-commit>] [-n|--no-interactive-rebase] <branch> [<branch> [<branch> ...]]
+            Usage: git machete slide-out [-d|--down-fork-point=<down-fork-point-commit>] [-M|--merge] [-n|--no-edit-merge|--no-interactive-rebase] <branch> [<branch> [<branch> ...]]
 
             Removes the given branch (or multiple branches) from the branch tree definition.
-            Then, rebases the downstream (child) branch of the last specified branch on the top of the upstream (parent) branch of the first specified branch.
+            Then synchronizes the downstream (child) branch of the last specified branch on the top of the upstream (parent) branch of the first specified branch.
+            Sync is performed either by rebase (default) or by merge (if '--merge' option passed).
+
             The most common use is to slide out a single branch whose upstream was a 'develop'/'master' branch and that has been recently merged.
 
-            Since this tool is designed to perform only one rebase at the end, provided branches must form a chain, i.e the following conditions must be met:
-            * (n+1)-th branch must be the ONLY downstream branch of the n-th branch.
-            * all provided branches must have exactly one downstream branch (even if only one branch is to be slid out)
+            Since this tool is designed to perform only one single rebase/merge at the end, provided branches must form a chain, i.e. all of the following conditions must be met:
+            * for i=1..N-1, (i+1)-th branch must be a downstream (child) branch of the i-th branch,
+            * all provided branches (including N-th branch) must have exactly one downstream branch,
             * all provided branches must have an upstream branch (so, in other words, roots of branch dependency tree cannot be slid out).
 
             For example, let's assume the following dependency tree:
 
-            develop
-                adjust-reads-prec
-                    block-cancel-order
-                        change-table
-                            drop-location-type
+              develop
+                  adjust-reads-prec
+                      block-cancel-order
+                          change-table
+                              drop-location-type
 
             And now let's assume that 'adjust-reads-prec' and later 'block-cancel-order' were merged to develop.
             After running 'git machete slide-out adjust-reads-prec block-cancel-order' the tree will be reduced to:
 
-            develop
-                change-table
-                    drop-location-type
+              develop
+                  change-table
+                      drop-location-type
 
             and 'change-table' will be rebased onto develop (fork point for this rebase is configurable, see '-d' option below).
 
             Note: This command doesn't delete any branches from git, just removes them from the tree of branch dependencies.
 
             Options:
-              -d, --down-fork-point=<down-fork-point-commit>    Specifies the alternative fork point commit after which the rebased part of history of the downstream branch is meant to start.
-                                                                See also doc for '--fork-point' option for 'git machete help reapply' and 'git machete help update'.
-              -n, --no-interactive-rebase                       Run 'git rebase' in non-interactive mode (without '-i/--interactive' flag).
+              -d, --down-fork-point=<down-fork-point-commit>    If updating by rebase, specifies the alternative fork point commit after which the rebased part of history of the downstream branch is meant to start.
+                                                                Ignored if updating by merge. See also doc for '--fork-point' option in 'git machete help reapply' and 'git machete help update'.
+              -M, --merge                                       Update the downstream branch by merge rather than by rebase.
+              -n                                                If updating by rebase, equivalent to '--no-interactive-rebase'. If updating by merge, equivalent to '--no-edit-merge'.
+              --no-edit-merge                                   If updating by merge, skip opening the editor for merge commit message while doing 'git merge' (i.e. pass '--no-edit' flag to underlying 'git merge'). Ignored if updating by rebase.
+              --no-interactive-rebase                           If updating by rebase, run 'git rebase' in non-interactive mode (without '-i/--interactive' flag). Ignored if updating by merge.
         """,
         "status": """
             Usage: git machete s[tatus] [--color=WHEN] [-l|--list-commits] [-L|--list-commits-with-hashes]
 
-            Outputs a tree-shaped status of the branches listed in the definition file.
+            Displays a tree-shaped status of the branches listed in the definition file.
 
             Apart from simply ASCII-formatting the definition file, this also:
             * prints '(untracked [on <remote>]/ahead of <remote>/behind <remote>/diverged from <remote>)' message for each branch that is not in sync with its remote counterpart;
@@ -2229,13 +2266,13 @@ def usage(c=None):
               -L, --list-commits-with-hashes    Additionally list the short hashes and messages of commits introduced on each branch.
         """,
         "traverse": """
-            Usage: git machete traverse [-F|--fetch] [-l|--list-commits] [-n|--no-interactive-rebase] [--return-to=WHERE] [--start-from=WHERE] [-w|--whole] [-W] [-y|--yes]
+            Usage: git machete traverse [-F|--fetch] [-l|--list-commits] [-M|--merge] [-n|--no-edit-merge|--no-interactive-rebase] [--return-to=WHERE] [--start-from=WHERE] [-w|--whole] [-W] [-y|--yes]
 
             Traverses the branch dependency in pre-order (i.e. simply in the order as they occur in the definition file) and for each branch:
             * if the branch is merged to its parent/upstream:
               - asks the user whether to slide out the branch from the dependency tree (typically branches are longer needed after they're merged);
             * otherwise, if the branch is not in "green" sync with its parent/upstream (see help for 'status'):
-              - asks the user whether to rebase the branch onto into its upstream branch - equivalent to 'git machete update' with no '--fork-point' option passed;
+              - asks the user whether to rebase (default) or merge (if '--merge' passed) the branch onto into its upstream branch - equivalent to 'git machete update' with no '--fork-point' option passed;
 
             * if the branch is not tracked on a remote, is ahead of its remote counterpart or diverged from the counterpart:
               - asks the user whether to push the branch (possibly with '--force-with-lease' if the branches diverged);
@@ -2245,35 +2282,44 @@ def usage(c=None):
             * and finally, if any of the above operations has been successfully completed:
               - prints the updated 'status'.
 
-            Note that even if the traverse flow is stopped (typically due to rebase conflicts), running 'git machete traverse' after the rebase is done will pick up the job where it stopped.
+            Note that even if the traverse flow is stopped (typically due to merge/rebase conflicts), running 'git machete traverse' after the merge/rebase is finished will pick up the walk where it stopped.
             In other words, there is no need to explicitly ask to "continue" as it is the case with e.g. 'git rebase'.
 
             Options:
               -F, --fetch                  Fetch the remotes of all managed branches at the beginning of traversal (no 'git pull' involved, only 'git fetch').
-              -l, --list-commits           Additionally list the messages of commits introduced on each branch when printing the status.
-              -n, --no-interactive-rebase  Run 'git rebase' in non-interactive mode (without '-i/--interactive' flag).
+              -l, --list-commits           When printing the status, additionally list the messages of commits introduced on each branch.
+              -M, --merge                  Update by merge rather than by rebase.
+              -n                           If updating by rebase, equivalent to '--no-interactive-rebase'. If updating by merge, equivalent to '--no-edit-merge'.
+              --no-edit-merge              If updating by merge, skip opening the editor for merge commit message while doing 'git merge' (i.e. pass '--no-edit' flag to underlying 'git merge'). Ignored if updating by rebase.
+              --no-interactive-rebase      If updating by rebase, run 'git rebase' in non-interactive mode (without '-i/--interactive' flag). Ignored if updating by merge.
               --return-to=WHERE            Specifies the branch to return after traversal is successfully completed; WHERE can be 'here' (the current branch at the moment when traversal starts),
                                            'nearest-remaining' (nearest remaining branch in case the 'here' branch has been slid out by the traversal)
                                            or 'stay' (the default - just stay wherever the traversal stops).
                                            Note: when user quits by 'q/yq' or when traversal is stopped because one of git actions fails, the behavior is always 'stay'.
               --start-from=WHERE           Specifies the branch to start the traversal from; WHERE can be 'here' (the default - current branch, must be managed by git-machete),
                                            'root' (root branch of the current branch, as in 'git machete show root') or 'first-root' (first listed managed branch).
-              -w, --whole                  Equivalent to '--start-from=first-root --no-interactive-rebase --return-to=nearest-remaining';
+              -w, --whole                  Equivalent to '--start-from=first-root -n --return-to=nearest-remaining';
                                            useful for quickly traversing & syncing all branches (rather than doing more fine-grained operations on the local section of the branch tree).
               -W                           Equivalent to '--fetch --whole'; useful for even more automated traversal of all branches.
-              -y, --yes                    Don't ask for any interactive input, including confirmation of rebase/push/pull. Implicates '--no-interactive-rebase'.
+              -y, --yes                    Don't ask for any interactive input, including confirmation of rebase/push/pull. Implicates '-n'.
         """,
         "update": """
-            Usage: git machete update [-f|--fork-point=<fork-point-commit>] [-n|--no-interactive-rebase]
+            Usage: git machete update [-f|--fork-point=<fork-point-commit>] [-M|--merge] [-n|--no-edit-merge|--no-interactive-rebase]
 
-            Interactively rebase the current branch on the top of its upstream (parent) branch.
-            This is useful e.g. for syncing the current branch with changes introduced by an upstream branch like 'develop', or changes commited on the parent branches.
-            The chunk of the history to be rebased starts at the automatically computed fork point of the current branch by default, but can also be set explicitly by '--fork-point'.
+            Synchronizes the current branch with its upstream (parent) branch either by rebase (default) or by merge (if '--merge' option passed).
+
+            If updating by rebase, interactively rebases the current branch on the top of its upstream (parent) branch.
+            The chunk of the history to be rebased starts at the fork point of the current branch, which by default is inferred automatically, but can also be set explicitly by '--fork-point'.
             See 'git machete help fork-point' for more details on meaning of the "fork point".
 
+            If updating by merge, merges the upstream (parent) branch into the current branch.
+
             Options:
-              -f, --fork-point=<fork-point-commit>    Specifies the alternative fork point commit after which the rebased part of history is meant to start.
-              -n, --no-interactive-rebase             Run 'git rebase' in non-interactive mode (without '-i/--interactive' flag).
+              -f, --fork-point=<fork-point-commit>    If updating by rebase, specifies the alternative fork point commit after which the rebased part of history is meant to start. Ignored if updating by merge.
+              -M, --merge                             Update by merge rather than by rebase.
+              -n                                      If updating by rebase, equivalent to '--no-interactive-rebase'. If updating by merge, equivalent to '--no-edit-merge'.
+              --no-edit-merge                         If updating by merge, skip opening the editor for merge commit message while doing 'git merge' (i.e. pass '--no-edit' flag to underlying 'git merge'). Ignored if updating by rebase.
+              --no-interactive-rebase                 If updating by rebase, run 'git rebase' in non-interactive mode (without '-i/--interactive' flag). Ignored if updating by merge.
         """,
         "version": """
             Usage: git machete version
@@ -2337,8 +2383,8 @@ def main():
 
 def launch(orig_args):
     def parse_options(in_args, short_opts="", long_opts=[], gnu=True):
-        global opt_checked_out_since, opt_color, opt_debug, opt_down_fork_point, opt_fetch, opt_fork_point, opt_inferred, opt_list_commits, opt_list_commits_with_hashes, opt_no_interactive_rebase
-        global opt_onto, opt_override_to, opt_override_to_inferred, opt_override_to_parent, opt_return_to, opt_roots, opt_start_from, opt_stat, opt_unset_override, opt_verbose, opt_yes
+        global opt_checked_out_since, opt_color, opt_debug, opt_down_fork_point, opt_fetch, opt_fork_point, opt_inferred, opt_list_commits, opt_list_commits_with_hashes, opt_merge, opt_no_edit_merge
+        global opt_no_interactive_rebase, opt_onto, opt_override_to, opt_override_to_inferred, opt_override_to_parent, opt_return_to, opt_roots, opt_start_from, opt_stat, opt_unset_override, opt_verbose, opt_yes
 
         fun = getopt.gnu_getopt if gnu else getopt.getopt
         opts, rest = fun(in_args, short_opts + "hv", long_opts + ['debug', 'help', 'verbose', 'version'])
@@ -2365,7 +2411,13 @@ def launch(orig_args):
                 opt_list_commits = opt_list_commits_with_hashes = True
             elif opt in ("-l", "--list-commits"):
                 opt_list_commits = True
-            elif opt in ("-n", "--no-interactive-rebase"):
+            elif opt in ("-M", "--merge"):
+                opt_merge = True
+            elif opt == "-n":
+                opt_no_edit_merge = opt_no_interactive_rebase = True
+            elif opt == "--no-edit-merge":
+                opt_no_edit_merge = True
+            elif opt == "--no-interactive-rebase":
                 opt_no_interactive_rebase = True
             elif opt in ("-o", "--onto"):
                 opt_onto = arg
@@ -2392,12 +2444,12 @@ def launch(orig_args):
                 sys.exit()
             elif opt in ("-w", "--whole"):
                 opt_start_from = "first-root"
-                opt_no_interactive_rebase = True
+                opt_no_edit_merge = opt_no_interactive_rebase = True
                 opt_return_to = "nearest-remaining"
             elif opt == "-W":
                 opt_fetch = True
                 opt_start_from = "first-root"
-                opt_no_interactive_rebase = True
+                opt_no_edit_merge = opt_no_interactive_rebase = True
                 opt_return_to = "nearest-remaining"
             elif opt in ("-y", "--yes"):
                 opt_yes = opt_no_interactive_rebase = True
@@ -2430,8 +2482,8 @@ def launch(orig_args):
             return in_args[0]
 
     global definition_file, up_branch
-    global opt_checked_out_since, opt_color, opt_debug, opt_down_fork_point, opt_fetch, opt_fork_point, opt_inferred, opt_list_commits, opt_list_commits_with_hashes, opt_no_interactive_rebase
-    global opt_onto, opt_override_to, opt_override_to_inferred, opt_override_to_parent, opt_return_to, opt_roots, opt_start_from, opt_stat, opt_unset_override, opt_verbose, opt_yes
+    global opt_checked_out_since, opt_color, opt_debug, opt_down_fork_point, opt_fetch, opt_fork_point, opt_inferred, opt_list_commits, opt_list_commits_with_hashes, opt_merge, opt_no_edit_merge
+    global opt_no_interactive_rebase, opt_onto, opt_override_to, opt_override_to_inferred, opt_override_to_parent, opt_return_to, opt_roots, opt_start_from, opt_stat, opt_unset_override, opt_verbose, opt_yes
     try:
         opt_checked_out_since = None
         opt_color = "auto"
@@ -2442,6 +2494,8 @@ def launch(orig_args):
         opt_inferred = False
         opt_list_commits = False
         opt_list_commits_with_hashes = False
+        opt_merge = False
+        opt_no_edit_merge = False
         opt_no_interactive_rebase = False
         opt_onto = None
         opt_override_to = None
@@ -2613,13 +2667,13 @@ def launch(orig_args):
             read_definition_file()
             expect_no_operation_in_progress()
             cb = current_branch()
-            reapply(cb, opt_fork_point or fork_point(cb, use_overrides=True))
+            rebase_onto_ancestor_commit(cb, opt_fork_point or fork_point(cb, use_overrides=True))
         elif cmd == "show":
             param = check_required_param(parse_options(args), directions)
             read_definition_file()
             print(parse_direction(current_branch(), down_pick_mode=False))
         elif cmd == "slide-out":
-            params = parse_options(args, "d:n", ["down-fork-point=", "no-interactive-rebase"])
+            params = parse_options(args, "d:Mn", ["down-fork-point=", "merge", "no-edit-merge", "no-interactive-rebase"])
             read_definition_file()
             expect_no_operation_in_progress()
             slide_out(params or [current_branch()])
@@ -2634,8 +2688,8 @@ def launch(orig_args):
             expect_at_least_one_managed_branch()
             status(use_fork_point_overrides=True, warn_on_yellow_edges=True)
         elif cmd == "traverse":
-            traverse_long_opts = ["fetch", "list-commits", "no-interactive-rebase", "return-to=", "start-from=", "whole", "yes"]
-            expect_no_param(parse_options(args, "FlnWwy", traverse_long_opts))
+            traverse_long_opts = ["fetch", "list-commits", "merge", "no-edit-merge", "no-interactive-rebase", "return-to=", "start-from=", "whole", "yes"]
+            expect_no_param(parse_options(args, "FlMnWwy", traverse_long_opts))
             if opt_start_from not in ("here", "root", "first-root"):
                 raise MacheteException("Invalid argument for '--start-from'. Valid arguments: here|root|first-root.")
             if opt_return_to not in ("here", "nearest-remaining", "stay"):
@@ -2644,12 +2698,11 @@ def launch(orig_args):
             expect_no_operation_in_progress()
             traverse()
         elif cmd == "update":
-            args1 = parse_options(args, "f:n", ["fork-point=", "no-interactive-rebase"])
+            args1 = parse_options(args, "f:Mn", ["fork-point=", "merge", "no-edit-merge" "no-interactive-rebase"])
             expect_no_param(args1, ". Use '-f' or '--fork-point' to specify the fork point commit")
             read_definition_file()
             expect_no_operation_in_progress()
-            cb = current_branch()
-            update(cb, opt_fork_point or fork_point(cb, use_overrides=True))
+            update()
         elif cmd == "version":
             version()
             sys.exit()
