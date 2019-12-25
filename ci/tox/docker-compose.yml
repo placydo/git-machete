@@ -1,0 +1,13 @@
+version: '3'
+services:
+  tox:
+    image: virtuslab/git-machete-ci-tox:${DOCKER_TAG:-latest}
+    build:
+      context: .
+      args:
+        - user_id=${USER_ID:-0}
+        - group_id=${GROUP_ID:-0}
+        - git_version=${GIT_VERSION:-0.0.0}
+        - python_version=${PYTHON_VERSION:-0.0.0}
+    volumes:
+      - ${PWD}/../..:/home/ci-user/git-machete

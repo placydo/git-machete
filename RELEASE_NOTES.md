@@ -1,5 +1,10 @@
 # Release notes
 
+## New in git-machete 2.13.1
+
+- improved: testing against multiple git versions in CI pipeline
+- improved: functional tests invoke `discover` and `traverse`
+
 ## New in git-machete 2.13.0
 
 - added: `version` command

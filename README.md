@@ -98,6 +98,11 @@ git machete traverse --fetch --start-from=first-root
 ```
 
 
+## Git compatibility
+
+git-machete (since version 2.13.1) is compatible with git >= 2.0.0.
+
+
 ## Reference
 
 Take a look at
